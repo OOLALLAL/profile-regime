@@ -11,7 +11,6 @@ import pyarrow.parquet as pq
 
 logger = logging.getLogger(__name__)
 
-
 def setup_logging(level: str) -> None:
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
@@ -22,7 +21,6 @@ def setup_logging(level: str) -> None:
 def parquet_exists(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
 
-
 def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_path.with_suffix(out_path.suffix + ".part")
@@ -31,9 +29,6 @@ def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
     tmp.replace(out_path)
 
 
-# -------------------------
-# Helpers: parse metadata
-# -------------------------
 FNAME_RE = re.compile(
     r"^(?P<symbol>[A-Z0-9]+)-features-(?P<tf>[^-]+)-(?P<date>\d{4}-\d{2}-\d{2})\.parquet$"
 )
@@ -44,50 +39,37 @@ def parse_feature_filename(name: str) -> dict:
         raise ValueError(f"Unexpected feature filename: {name}")
     return m.groupdict()
 
-
-# -------------------------
-# ATZ logic (lookahead-free)
-# -------------------------
 def compute_rolling_thresholds(
-    s: pd.Series,
-    window: int,
-    q: float,
-    min_periods: int | None = None,
-    eps: float = 1e-12,
+        s: pd.Series,
+        window: int,
+        q: float,
+        min_periods: int | None = None,
+        eps: float = 1e-12,
 ) -> pd.Series:
-    """
-    Lookahead-free: uses only past values (pandas rolling includes current).
-    We shift by 1 to ensure threshold at t uses data <= t-1.
-    """
     if min_periods is None:
         min_periods = max(10, window // 2)
 
-    th = s.rolling(window=window, min_periods=min_periods).quantile(q)
-    th = th.shift(1)  # critical to avoid using current bar in threshold
+
+    th = s.rolling(window, min_periods=min_periods).quantile(q)
+    th = th.shift(1)
     return th + eps
 
-
 def make_atz_flag(
-    df: pd.DataFrame,
-    window: int,
-    q: float,
-    use_trade_count: bool = True,
-    use_cv: bool = True,
+        df: pd.DataFrame,
+        window: int,
+        q: float,
+        use_trade_count: bool = True,
+        use_cv: bool = True,
 ) -> pd.Series:
-    """
-    ATZ if activity is unusually high relative to trailing window.
-    Default: OR condition on cv and trade_count.
-    """
+
     flags = []
 
     if use_cv:
         cv_th = compute_rolling_thresholds(df["cv"], window=window, q=q)
         flags.append(df["cv"] > cv_th)
-
     if use_trade_count:
         tc_th = compute_rolling_thresholds(df["trade_count"], window=window, q=q)
         flags.append(df["trade_count"] > tc_th)
-
     if not flags:
         raise ValueError("At least one of use_cv/use_trade_count must be True")
 
@@ -95,9 +77,7 @@ def make_atz_flag(
     for f in flags[1:]:
         out = out | f
 
-    # NaNs in early window -> False
     return out.fillna(False)
-
 
 def build_events_from_flag(
     df: pd.DataFrame,
@@ -105,13 +85,9 @@ def build_events_from_flag(
     min_bars: int = 2,
     merge_gap: int = 0,
 ) -> pd.DataFrame:
-    """
-    Convert boolean ATZ flag into contiguous events.
-    merge_gap: if >0, merge events separated by <= merge_gap False bars.
-    """
+
     assert len(df) == len(flag)
 
-    # Optionally "close small gaps" in flag to merge nearby bursts
     if merge_gap > 0:
         f = flag.to_numpy(dtype=bool)
         false_run = 0
@@ -120,87 +96,86 @@ def build_events_from_flag(
                 false_run += 1
             else:
                 if 0 < false_run <= merge_gap:
-                    f[i - false_run:i] = True
+                    f[i - false_run: i] = True
                 false_run = 0
         flag = pd.Series(f, index=flag.index)
 
     events = []
     in_event = False
-    s = 0
+    start = 0
     eid = 0
-
     for i, is_on in enumerate(flag.to_numpy(dtype=bool)):
         if is_on and not in_event:
             in_event = True
-            s = i
+            start = i
         elif (not is_on) and in_event:
-            e = i - 1
-            n = e - s + 1
-            if n >= min_bars:
+            end = i - 1
+            bars = end - start + 1
+            if bars >= min_bars:
                 eid += 1
-                seg = df.iloc[s:e+1]
-                events.append({
+                seg = df.iloc[start:end+1]
+                events.append(
+                    {
+                        "atz_id": eid,
+                        "start_idx": int(start),
+                        "end_idx": int(end),
+                        "start_ts": seg["ts"].iloc[0],
+                        "end_ts": seg["ts"].iloc[-1],
+                        "n_bars": int(bars),
+
+                        # activity stats
+                        "cv_sum": float(seg["cv"].sum()),
+                        "cv_mean": float(seg["cv"].mean()),
+                        "trade_count_sum": float(seg["trade_count"].sum()),
+                        "trade_count_mean": float(seg["trade_count"].mean()),
+
+                        # price context
+                        "open": float(seg["open"].iloc[0]),
+                        "close": float(seg["close"].iloc[-1]),
+                        "high": float(seg["high"].max()),
+                        "low": float(seg["low"].min()),
+                        "range": float(seg["high"].max() - seg["low"].min()),
+                        "range_per_bar": float((seg["high"].max() - seg["low"].min()) / bars),
+                        "ret": float(seg["close"].iloc[-1] / seg["open"].iloc[0] - 1.0),
+                    }
+                )
+            in_event = False
+    # if ended while in_event
+    if in_event:
+        end = len(df) - 1
+        bars = end - start + 1
+        if bars >= min_bars:
+            eid += 1
+            seg = df.iloc[start:end+1]
+            events.append(
+                {
                     "atz_id": eid,
-                    "start_idx": int(s),
-                    "end_idx": int(e),
+                    "start_idx": int(start),
+                    "end_idx": int(end),
                     "start_ts": seg["ts"].iloc[0],
                     "end_ts": seg["ts"].iloc[-1],
-                    "n_bars": int(n),
-
-                    # activity stats
+                    "n_bars": int(bars),
                     "cv_sum": float(seg["cv"].sum()),
                     "cv_mean": float(seg["cv"].mean()),
                     "trade_count_sum": float(seg["trade_count"].sum()),
                     "trade_count_mean": float(seg["trade_count"].mean()),
-
-                    # price context
                     "open": float(seg["open"].iloc[0]),
                     "close": float(seg["close"].iloc[-1]),
                     "high": float(seg["high"].max()),
                     "low": float(seg["low"].min()),
                     "range": float(seg["high"].max() - seg["low"].min()),
+                    "range_per_bar": float((seg["high"].max() - seg["low"].min()) / bars),
                     "ret": float(seg["close"].iloc[-1] / seg["open"].iloc[0] - 1.0),
-                })
-            in_event = False
-
-    # close if ended while in_event
-    if in_event:
-        e = len(df) - 1
-        n = e - s + 1
-        if n >= min_bars:
-            eid += 1
-            seg = df.iloc[s:e+1]
-            events.append({
-                "atz_id": eid,
-                "start_idx": int(s),
-                "end_idx": int(e),
-                "start_ts": seg["ts"].iloc[0],
-                "end_ts": seg["ts"].iloc[-1],
-                "n_bars": int(n),
-                "cv_sum": float(seg["cv"].sum()),
-                "cv_mean": float(seg["cv"].mean()),
-                "trade_count_sum": float(seg["trade_count"].sum()),
-                "trade_count_mean": float(seg["trade_count"].mean()),
-                "open": float(seg["open"].iloc[0]),
-                "close": float(seg["close"].iloc[-1]),
-                "high": float(seg["high"].max()),
-                "low": float(seg["low"].min()),
-                "range": float(seg["high"].max() - seg["low"].min()),
-                "ret": float(seg["close"].iloc[-1] / seg["open"].iloc[0] - 1.0),
-            })
-
+                }
+            )
     return pd.DataFrame(events)
 
-
-# -------------------------
-# CLI
-# -------------------------
 @dataclass
 class Args:
     features_dir: Path
     out_dir: Path
-    symbol: str | None
-    tf: str | None
+    symbol: str
+    tf: str
 
     window: int
     q: float
@@ -213,17 +188,13 @@ class Args:
     overwrite: bool
     log_level: str
 
+def parse_args():
+    p = argparse.ArgumentParser("features_tf -> ATZ events")
+    p.add_argument("--features-dir", type=Path, required=True,)
+    p.add_argument("--out-dir", type=Path, required=True)
 
-def parse_args() -> Args:
-    p = argparse.ArgumentParser("features_tf -> ATZ events (lookahead-free)")
-
-    p.add_argument("--features-dir", type=Path, required=True,
-                   help="e.g. .../features_tf/symbol=BTCUSDT")
-    p.add_argument("--out-dir", type=Path, required=True,
-                   help="e.g. .../events/atz/symbol=BTCUSDT")
-
-    p.add_argument("--symbol", type=str, default=None, help="optional filter")
-    p.add_argument("--tf", type=str, default=None, help="optional filter, like 15min")
+    p.add_argument("--symbol", type=str, required=True, help="optional filter")
+    p.add_argument("--tf", type=str, required=True, help="optional filter, like 15min")
 
     p.add_argument("--window", type=int, default=96, help="rolling window in TF bars (96=1 day for 15m)")
     p.add_argument("--q", type=float, default=0.90, help="quantile for activity threshold")
@@ -231,10 +202,7 @@ def parse_args() -> Args:
     p.add_argument("--min-bars", type=int, default=2, help="min consecutive bars for an ATZ event")
     p.add_argument("--merge-gap", type=int, default=1, help="merge events separated by <= gap bars")
 
-    p.add_argument("--use-cv", action="store_true", default=True)
     p.add_argument("--no-cv", action="store_true", help="disable cv condition")
-
-    p.add_argument("--use-trade-count", action="store_true", default=True)
     p.add_argument("--no-trade-count", action="store_true", help="disable trade_count condition")
 
     p.add_argument("--overwrite", action="store_true")
@@ -263,8 +231,6 @@ def parse_args() -> Args:
         overwrite=ns.overwrite,
         log_level=ns.log_level,
     )
-
-
 def run(args: Args) -> None:
     args.out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -275,10 +241,8 @@ def run(args: Args) -> None:
     for fp in fps:
         meta = parse_feature_filename(fp.name)
 
-        if args.symbol and meta["symbol"] != args.symbol:
-            continue
-        if args.tf and meta["tf"] != args.tf:
-            continue
+        if meta["symbol"] != args.symbol: continue
+        if meta["tf"] != args.tf: continue
 
         out_name = fp.name.replace("-features-", "-atz-")
         out_path = args.out_dir / out_name
@@ -316,7 +280,6 @@ def run(args: Args) -> None:
             merge_gap=args.merge_gap,
         )
 
-        # add metadata columns
         events.insert(0, "tf", meta["tf"])
         events.insert(0, "date", meta["date"])
         events.insert(0, "symbol", meta["symbol"])
