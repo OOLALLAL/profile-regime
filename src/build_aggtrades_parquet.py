@@ -82,6 +82,7 @@ def convert_zip_to_parquet(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
+    logger.info("DOWNLOADING  %s", out_path.name)
     with zipfile.ZipFile(zip_path) as zf:
         csv_files = [n for n in zf.namelist() if n.endswith(".csv")]
         if not csv_files:
@@ -95,10 +96,13 @@ def convert_zip_to_parquet(
 
             df = read_aggtrades_csv(tmp_csv)
 
+
     table = pa.Table.from_pandas(df, preserve_index=False)
     tmp_out = out_path.with_suffix(".parquet.part")
     pq.write_table(table, tmp_out, compression="zstd")
     tmp_out.replace(out_path)
+
+    logger.info("OK  %s (%.2f MB)", out_path.name, out_path.stat().st_size / 1024 / 1024)
 
 @dataclass
 class Args:
@@ -124,12 +128,14 @@ def parse_args() -> Args:
 
 def run(args: Args):
     zips = sorted(args.zips_dir.glob("*-aggTrades-*.zip"))
+
     if not zips:
         raise SystemExit("No zip files found")
 
     for z in zips:
         convert_zip_to_parquet(z, args.out_dir, overwrite=args.overwrite)
 
+    logger.info("DONE | saved_to=%s",  args.out_dir)
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(args.log_level)

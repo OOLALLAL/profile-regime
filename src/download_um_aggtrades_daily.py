@@ -72,7 +72,7 @@ class Args:
 
 def parse_args() -> Args:
     p = argparse.ArgumentParser()
-    p.add_argument("--symbol", required=True, help="e.g. BTCUSDT")
+    p.add_argument("--symbol", required=True, help="e.g. BYCUSDT")
     p.add_argument("--start", required=True, help="YYYYMMDD ( UTC date)")
     p.add_argument("--end", required=True, help="YYYYMMDD ( UTC date)")
     p.add_argument("--out-dir", type=Path, default=Path("D:/data/profile-regime"), help="Base output directory")
@@ -119,5 +119,4 @@ def run(args: Args) -> None:
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(args.log_level)
-
     run(args)
