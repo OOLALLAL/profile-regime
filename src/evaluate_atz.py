@@ -39,7 +39,7 @@ def future_metrics(df: pd.DataFrame, idx: int, horizon: int) -> dict:
 
     return {
         "mfe": (hi - entry) / entry,
-        "mae": (lo - entry) / entry,
+        "mae": (entry - lo) / entry,
         "range": (hi - lo) / entry,
     }
 @dataclass
@@ -150,4 +150,5 @@ def run(args: Args):
 if __name__ == "__main__":
     args = parse_args()
     setup_logging(args.log_level)
+
     run(args)
