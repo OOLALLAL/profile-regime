@@ -1,156 +1,190 @@
 import argparse
+import datetime as dt
 import logging
-from dataclasses import dataclass
+import subprocess
+import sys
 from pathlib import Path
-import re
 
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.parquet as pq
-
-logger = logging.getLogger(__name__)
-
-FEATURE_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9]+)-features-(?P<tf>[^-]+)-(?P<date>\d{4}-\d{2}-\d{2})\.parquet$"
-)
-ATZ_RE = re.compile(
-    r"^(?P<symbol>[A-Z0-9]+)-atz-(?P<tf>[^-]+)-(?P<date>\d{4}-\d{2}-\d{2})\.parquet$"
-)
-
-def setup_logging(level: str) -> None:
+# -------------------------
+# logging
+# -------------------------
+def setup_logging(level: str):
     logging.basicConfig(
         level=getattr(logging, level.upper(), logging.INFO),
         format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
     )
 
-def write_parquet(df: pd.DataFrame, out_path: Path) -> None:
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = out_path.with_suffix(out_path.suffix + ".part")
-    pq.write_table(pa.Table.from_pandas(df, preserve_index=False), tmp, compression="zstd")
-    tmp.replace(out_path)
+logger = logging.getLogger("run")
 
-def future_metrics(df: pd.DataFrame, idx: int, h: int) -> dict:
-    entry = df.loc[idx, "close"]
-    end = min(len(df) - 1, idx + h)
 
-    hi = df.loc[idx+1:end, "high"].max()
-    lo = df.loc[idx+1:end, "low"].min()
+def run_cmd(cmd: list[str]):
+    logger.info("CMD  %s", " ".join(cmd))
+    subprocess.check_call(cmd)
 
-    return {
-        "mfe": (hi - entry) / entry,
-        "mae": (lo - entry) / entry,
-        "range": (hi - lo) / entry,
-    }
 
-@dataclass
-class Args:
-    features_dir: Path
-    atz_dir: Path
-    out_dir: Path
-
-    horizon: int
-    baseline_ratio: float
-    seed: int
-
-    overwrite: bool
-    log_level: str
-
+# -------------------------
+# args
+# -------------------------
 def parse_args():
-    p = argparse.ArgumentParser("Evaluate ATZ vs baseline")
+    p = argparse.ArgumentParser("Full ATZ pipeline runner")
 
-    p.add_argument("--features-dir", type=Path, required=True)
-    p.add_argument("--atz-dir", type=Path, required=True)
-    p.add_argument("--out-dir", type=Path, required=True)
+    # ===== download =====
+    p.add_argument("--symbol", required=True, help="e.g. BTCUSDT")
+    p.add_argument("--start", required=True, help="YYYYMMDD")
+    p.add_argument("--end", required=True, help="YYYYMMDD")
 
-    p.add_argument("--horizon", type=int, default=8, help="future bars after ATZ end")
+    # ===== common dirs =====
+    p.add_argument("--data-root", type=Path, required=True,
+                   help="BASE DATA DIR (e.g. D:/data/profile-regime)")
+
+    # ===== tf / atz =====
+    p.add_argument("--tf", default="15min")
+    p.add_argument("--atz-window", type=int, default=8)
+    p.add_argument("--atz-q", type=float, default=0.90)
+    p.add_argument("--atz-min-bars", type=int, default=2)
+    p.add_argument("--atz-merge-gap", type=int, default=1)
+
+    # ===== eval =====
+    p.add_argument("--horizon", type=int, default=8)
     p.add_argument("--baseline-ratio", type=float, default=3.0)
     p.add_argument("--seed", type=int, default=7)
 
+    # ===== analyze =====
+    p.add_argument("--metrics", default="mfe,mae,range")
+    p.add_argument("--by-date", action="store_true")
+
+    # ===== behavior =====
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--log-level", default="INFO")
 
-    ns = p.parse_args()
-    return Args(**vars(ns))
+    return p.parse_args()
 
-def run(args: Args):
-    rng = np.random.default_rng(args.seed)
-    args.out_dir.mkdir(parents=True, exist_ok=True)
 
-    feat_files = sorted(args.features_dir.glob("*.parquet"))
-    atz_files = sorted(args.atz_dir.glob("*.parquet"))
-
-    fmap = {}
-    for fp in feat_files:
-        meta = FEATURE_RE.match(fp.name).groupdict()
-        fmap[(meta["symbol"], meta["tf"], meta["date"])] = fp
-
-    rows = []
-
-    for ap in atz_files:
-        meta = ATZ_RE.match(ap.name).groupdict()
-        key = (meta["symbol"], meta["tf"], meta["date"])
-        if key not in fmap:
-            continue
-
-        df = pd.read_parquet(fmap[key])
-        df["ts"] = pd.to_datetime(df["ts"], utc=True)
-        df = df.sort_values("ts").reset_index(drop=True)
-
-        ev = pd.read_parquet(ap)
-        if len(ev) == 0:
-            continue
-
-        # ---------- ATZ ----------
-        for _, r in ev.iterrows():
-            idx = int(r["end_idx"])
-            if idx + args.horizon >= len(df):
-                continue
-            m = future_metrics(df, idx, args.horizon)
-            rows.append({
-                "group": "atz",
-                "symbol": meta["symbol"],
-                "tf": meta["tf"],
-                "date": meta["date"],
-                **m
-            })
-
-        # ---------- BASELINE ----------
-        blocked = np.zeros(len(df), dtype=bool)
-        for _, r in ev.iterrows():
-            blocked[int(r["start_idx"]):int(r["end_idx"])+1] = True
-
-        valid = np.where(~blocked)[0]
-        valid = valid[valid + args.horizon < len(df)]
-
-        n_base = min(int(len(ev) * args.baseline_ratio), len(valid))
-        base_idx = rng.choice(valid, size=n_base, replace=False)
-
-        for idx in base_idx:
-            m = future_metrics(df, int(idx), args.horizon)
-            rows.append({
-                "group": "baseline",
-                "symbol": meta["symbol"],
-                "tf": meta["tf"],
-                "date": meta["date"],
-                **m
-            })
-
-    df_all = pd.DataFrame(rows)
-
-    summary = (
-        df_all
-        .groupby("group")[["mfe", "mae", "range"]]
-        .agg(["mean", "median", "quantile"])
-    )
-
-    write_parquet(df_all, args.out_dir / "atz_eval_events.parquet")
-    write_parquet(summary.reset_index(), args.out_dir / "atz_eval_summary.parquet")
-
-    logger.info("OK events=%d", len(df_all))
-    logger.info("OK summary saved")
-
-if __name__ == "__main__":
+# -------------------------
+# main
+# -------------------------
+def main():
     args = parse_args()
     setup_logging(args.log_level)
-    run(args)
+
+    py = sys.executable
+
+    # -------------------------
+    # directory convention (PLACEHOLDER)
+    # -------------------------
+    base = args.data_root
+
+    zips_dir = base / "zips"                    # ← download 결과
+    trades_dir = base / "aggTrades_parquet"     # ← build_aggtrades_parquet
+    bars_1m_dir = base / "bars_1m"              # ← build_1m_bars
+    features_dir = base / "features_tf"         # ← build_tf_features
+    atz_dir = base / "events" / "atz"            # ← build_atz_events
+    eval_dir = base / "eval" / f"symbol={args.symbol}"
+    report_dir = base / "report" / f"symbol={args.symbol}"
+
+    eval_dir.mkdir(parents=True, exist_ok=True)
+    report_dir.mkdir(parents=True, exist_ok=True)
+
+    # -------------------------
+    # RUN ID (for logs only)
+    # -------------------------
+    run_id = dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+    logger.info("RUN %s | %s %s~%s", run_id, args.symbol, args.start, args.end)
+
+    # ============================================================
+    # 1) download_um_aggtrades_daily.py
+    # ============================================================
+    run_cmd([
+        py, "src/download_um_aggtrades_daily.py",
+        "--symbol", args.symbol,
+        "--start", args.start,
+        "--end", args.end,
+        "--out-dir", str(base),
+    ])
+
+    # ============================================================
+    # 2) build_aggtrades_parquet.py
+    # ============================================================
+    cmd2 = [
+        py, "src/build_aggtrades_parquet.py",
+        "--zips-dir", str(zips_dir),
+        "--out-dir", str(trades_dir),
+    ]
+    if args.overwrite:
+        cmd2.append("--overwrite")
+    run_cmd(cmd2)
+
+    # ============================================================
+    # 3) build_1m_bars.py
+    # ============================================================
+    cmd3 = [
+        py, "src/build_1m_bars.py",
+        "--trades-dir", str(trades_dir),
+        "--out-dir", str(bars_1m_dir),
+    ]
+    if args.overwrite:
+        cmd3.append("--overwrite")
+    run_cmd(cmd3)
+
+    # ============================================================
+    # 4) build_tf_features.py
+    # ============================================================
+    cmd4 = [
+        py, "src/build_tf_features.py",
+        "--bars-1m-dir", str(bars_1m_dir),
+        "--out-dir", str(features_dir),
+        "--tf", args.tf,
+        "--r-norm", "range",
+    ]
+    run_cmd(cmd4)
+
+    # ============================================================
+    # 5) build_atz_events.py
+    # ============================================================
+    cmd5 = [
+        py, "src/build_atz_events.py",
+        "--features-dir", str(features_dir),
+        "--out-dir", str(atz_dir),
+        "--symbol", args.symbol,
+        "--tf", args.tf,
+        "--window", str(args.atz_window),
+        "--q", str(args.atz_q),
+        "--min-bars", str(args.atz_min_bars),
+        "--merge-gap", str(args.atz_merge_gap),
+    ]
+    run_cmd(cmd5)
+
+    # ============================================================
+    # 6) evaluate_atz.py
+    # ============================================================
+    cmd6 = [
+        py, "src/evaluate_atz.py",
+        "--features-dir", str(features_dir),
+        "--atz-dir", str(atz_dir),
+        "--out-dir", str(eval_dir),
+        "--horizon", str(args.horizon),
+        "--baseline-ratio", str(args.baseline_ratio),
+        "--seed", str(args.seed),
+    ]
+    run_cmd(cmd6)
+
+    # ============================================================
+    # 7) analize_atz_eval.py
+    # ============================================================
+    cmd7 = [
+        py, "src/analize_atz_eval.py",
+        "--in-events", str(eval_dir / "atz_eval_events.parquet"),
+        "--out-dir", str(report_dir),
+        "--metrics", args.metrics,
+    ]
+    if args.by_date:
+        cmd7.append("--by-date")
+    run_cmd(cmd7)
+
+    logger.info("PIPELINE DONE")
+    logger.info("eval   -> %s", eval_dir)
+    logger.info("report -> %s", report_dir)
+
+
+if __name__ == "__main__":
+    main()
