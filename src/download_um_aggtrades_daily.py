@@ -75,7 +75,7 @@ def parse_args() -> Args:
     p.add_argument("--symbol", required=True, help="e.g. BYCUSDT")
     p.add_argument("--start", required=True, help="YYYYMMDD ( UTC date)")
     p.add_argument("--end", required=True, help="YYYYMMDD ( UTC date)")
-    p.add_argument("--out-dir", type=Path, default=Path("D:/data/profile-regime"), help="Base output directory")
+    p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--sleep-sec", type=float, default=0.2, help="Sleep between requests to be polite")
     p.add_argument("--log_level", type=str, default="INFO", help="DEBUG|INFO|WARNING|ERROR")
     ns = p.parse_args()
@@ -96,7 +96,7 @@ def parse_args() -> Args:
 
 def run(args: Args) -> None:
 
-    zips_dir = args.out_dir / "raw" / "binance_data" / "futures_um" / "daily" / "aggTrades" / f"symbol={args.symbol}"
+    zips_dir = args.out_dir
 
     ok, miss = 0, 0
     for d in daterange_inclusive(args.start, args.end):

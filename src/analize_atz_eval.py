@@ -118,7 +118,6 @@ def parse_args() -> Args:
     p.add_argument("--metrics", type=str, default="mfe,mae,range")
     p.add_argument("--atz-label", type=str, default="atz")
     p.add_argument("--base-label", type=str, default="baseline")
-    p.add_argument("--by-symbol", action="store_true")
     p.add_argument("--by-date", action="store_true")
     p.add_argument("--log-level", default="INFO")
     ns = p.parse_args()
