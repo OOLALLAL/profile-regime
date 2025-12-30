@@ -79,7 +79,7 @@ def main():
     zips_dir = root_dir/"raw"/"binance_data"/"futures_um"/"daily"/"aggTrades"/f"symbol={args.symbol}"
     trades_dir = root_dir/"parquet"/"futures_um"/"daily"/"aggTrades"/f"symbol={args.symbol}"
     bars_dir = root_dir/"parquet"/"futures_um"/"daily"/"bars_1m"/f"symbol={args.symbol}"
-    features_dir = root_dir/"parquet"/"futures_um"/"daily"/"features_tf"/"tf=15m"/f"symbol={args.symbol}"
+    features_dir = root_dir/"parquet"/"futures_um"/"daily"/"features_tf"/f"tf={args.tf}"/f"symbol={args.symbol}"
     atz_dir = root_dir/"parquet"/"futures_um"/"daily"/"events"/"atz"/f"symbol={args.symbol}"
     eval_dir = root_dir/"parquet"/"futures_um"/"daily"/"eval"/"atz_events"/f"symbol={args.symbol}"
     report_dir = root_dir/"parquet"/"futures_um"/"daily"/"report"/"atz_eval"/f"symbol={args.symbol}"
@@ -152,7 +152,7 @@ def main():
         "--tf", str(args.tf),
         "--window", str(args.window),
         "--q", str(args.q),
-        "min-bars", str(args.min_bars),
+        "--min-bars", str(args.min_bars),
         "--merge-gap", str(args.merge_gap),
         "--log-level", args.log_level,
     ]
