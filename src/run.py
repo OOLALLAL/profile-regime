@@ -63,6 +63,10 @@ def parse_args():
     p.add_argument("--overwrite", action="store_true")
     p.add_argument("--log-level", default="INFO")
 
+    # ===== id =====
+    p.add_argument("--run-id", type=str, required=True)
+    p.add_argument("--grid-id", type=str, required=True)
+
     return p.parse_args()
 
 # -------------------------
@@ -76,16 +80,18 @@ def main():
 
     # ===== directory convention =====
     root_dir = args.data_root
-    zips_dir = root_dir/"raw"/"binance_data"/"futures_um"/"daily"/"aggTrades"/f"symbol={args.symbol}"
-    trades_dir = root_dir/"parquet"/"futures_um"/"daily"/"aggTrades"/f"symbol={args.symbol}"
-    bars_dir = root_dir/"parquet"/"futures_um"/"daily"/"bars_1m"/f"symbol={args.symbol}"
-    features_dir = root_dir/"parquet"/"futures_um"/"daily"/"features_tf"/f"tf={args.tf}"/f"symbol={args.symbol}"
-    atz_dir = root_dir/"parquet"/"futures_um"/"daily"/"events"/"atz"/f"symbol={args.symbol}"
-    eval_dir = root_dir/"parquet"/"futures_um"/"daily"/"eval"/"atz_events"/f"symbol={args.symbol}"
-    report_dir = root_dir/"parquet"/"futures_um"/"daily"/"report"/"atz_eval"/f"symbol={args.symbol}"
 
+    zips_dir = root_dir/"raw"/"binance"/"futures_um"/"aggTrades"/f"symbol={args.symbol}"
 
-    # ===== RUN ID (only for logs) =====
+    cache_dir = root_dir/"cache"/"binance"/"futures_um"/f"symbol={args.symbol}"
+    trades_dir = cache_dir/"aggTrades"
+    bars_dir = cache_dir/"bars_1m"
+    features_dir = cahce_dir/"features_tf"/f"tf={args.tf}"
+
+    exp_dir = root_dir/"experiments"/"binance"/"futures_um"/f"symbol={args.symbol}"/f"run={args.run_id}"/f"grid={args.grid_id}"
+    atz_dir = exp_dir / "events" / "atz"
+    eval_dir = exp_dir / "eval" / "atz_events"
+    report_dir = exp_dir / "report" / "atz_eval"
 
     # ============================================================
     # 1) download_um_aggtrades_daily.py
