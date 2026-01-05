@@ -49,7 +49,7 @@ def parse_args():
     p.add_argument("--no-trade-count", action="store_true", help="disable trade_count condition")
 
     # ===== eval =====
-    p.add_argument("--horizon", type=int, default=8, help="future bars after ATZ end")
+    p.add_argument("--horizon", type=int, required=True, help="future bars after ATZ end")
     p.add_argument("--baseline-ratio", type=float, default=3.0)
     p.add_argument("--seed", type=int, default=7)
 
