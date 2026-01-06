@@ -5,7 +5,7 @@ param(
     [string]$symbol = "BTCUSDT",
     [string]$start = "20250601",
     [string]$end = "20251220",
-    [string]$data_root = "D:\data2\profile-regime",
+    [string]$data_root = "D:\data\profile-regime",
 
     # grid
     [string[]]$tf_list = @("15min", "1h"),
