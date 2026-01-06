@@ -77,7 +77,7 @@ def parse_args() -> Args:
     p.add_argument("--end", required=True, help="YYYYMMDD ( UTC date)")
     p.add_argument("--out-dir", required=True, type=Path)
     p.add_argument("--sleep-sec", type=float, default=0.2, help="Sleep between requests to be polite")
-    p.add_argument("--log_level", type=str, default="INFO", help="DEBUG|INFO|WARNING|ERROR")
+    p.add_argument("--log-level", type=str, default="INFO", help="DEBUG|INFO|WARNING|ERROR")
     ns = p.parse_args()
 
     start = parse_yyyymmdd(ns.start)

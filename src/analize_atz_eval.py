@@ -107,7 +107,6 @@ class Args:
     metrics: str
     atz_label: str
     base_label: str
-    by_symbol: bool
     by_date: bool
     log_level: str
 

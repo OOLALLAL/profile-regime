@@ -86,7 +86,7 @@ def main():
     cache_dir = root_dir/"cache"/"binance"/"futures_um"/f"symbol={args.symbol}"
     trades_dir = cache_dir/"aggTrades"
     bars_dir = cache_dir/"bars_1m"
-    features_dir = cahce_dir/"features_tf"/f"tf={args.tf}"
+    features_dir = cache_dir/"features_tf"/f"tf={args.tf}"
 
     exp_dir = root_dir/"experiments"/"binance"/"futures_um"/f"symbol={args.symbol}"/f"run={args.run_id}"/f"grid={args.grid_id}"
     atz_dir = exp_dir / "events" / "atz"

@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
+from scipy.signal import resample
 
 logger = logging.getLogger(__name__)
 
@@ -40,11 +41,13 @@ def parse_args() -> Args:
         overwrite=ns.overwrite,
         log_level=ns.log_level,
     )
-
 def build_1m_bar(df: pd.DataFrame) -> pd.DataFrame:
     dt = pd.to_datetime(df["transact_time"], unit="ms", utc=True)
     df = df.assign(ts=dt).set_index("ts")
 
+    if df.empty:
+        logger.warning("EMPTY aggTrades, skip")
+        return None
     g = df.resample("1min")
 
     bar = pd.DataFrame(
@@ -76,6 +79,9 @@ def run(args: Args) -> None:
 
         df = pd.read_parquet(tp)
         bar = build_1m_bar(df)
+        if bar is None or bar.empty:
+            logger.warning("Skip bar build (invalid input)")
+            continue
 
         out_path = out_dir / tp.name.replace("aggTrades", "bars-1m")
         if parquet_exists(out_path) and not args.overwrite:
