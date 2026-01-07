@@ -1,156 +1,172 @@
-from pathlib import Path
-import re
-import warnings
-
 import numpy as np
 import pandas as pd
+from pathlib import Path
 
-# -----------------------------
-# config
-# -----------------------------
-grid_re = re.compile(
-    r"tf=(?P<tf>[^_]+)__w=(?P<w>\d+)__q=(?P<q>\d+\.\d+)__m=(?P<m>\d+)__g=(?P<g>\d+)__h=(?P<h>\d+)"
+EPS = 1e-12
+
+SYMBOL = "BTCUSDT"
+TF = "15min"
+
+FEATURE_TF_PATH = Path(
+    rf"D:\data\profile-regime\cache\binance\futures_um\symbol=BTCUSDT\features_tf\tf={TF}"
 )
 
-# 필수 컬럼 (최소)
-REQUIRED_COLS = {"metric", "n_atz", "diff_p95", "ks_d", "cliffs_delta"}
+EVENT_ROOT = Path(
+    r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT"
+)
 
-# -----------------------------
-# helpers
-# -----------------------------
-def safe_read_report_csv(path: Path) -> pd.DataFrame | None:
-    """깨진/빈 CSV를 100% 안전하게 스킵. 성공하면 DF 반환, 실패하면 None."""
-    try:
-        # 1) 텍스트로 첫 줄 확인 (헤더 유무)
-        with path.open("r", encoding="utf-8", errors="ignore") as f:
-            first = f.readline()
-        if not first or not first.strip():
-            print(f"[SKIP] empty header line: {path}")
-            return None
+OUT_DIR = EVENT_ROOT / "event_features"
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-        # 2) read_csv 자체가 EmptyDataError 등 낼 수 있으니 try
-        df = pd.read_csv(path)
+def parse_grid_meta(grid_name: str) -> dict:
+    # grid=tf=15min__w=96__q=0.90__m=2__g=0__h=16
+    out = {}
+    for part in grid_name.replace("grid=", "").split("__"):
+        k, v = part.split("=")
+        out[k] = v
 
-        # 3) 컬럼 검증
-        if df.empty:
-            # empty DF는 스킵(혹은 유지해도 되지만, 지금 목적상 스킵이 안전)
-            print(f"[SKIP] df empty: {path}")
-            return None
+    out["w"] = int(out["w"])
+    out["q"] = float(out["q"])
+    out["m"] = int(out["m"])
+    out["g"] = int(out["g"])
+    out["h"] = int(out["h"])
+    return out
 
-        missing = REQUIRED_COLS - set(df.columns)
-        if missing:
-            print(f"[SKIP] missing cols {sorted(missing)}: {path}")
-            return None
+def main():
+    tf_df = pd.read_parquet(FEATURE_TF_PATH).reset_index(drop=True)
 
-        return df
+    tf_df["ts"] = pd.to_datetime(tf_df["ts"], utc=True, errors="coerce")
+    tf_df = tf_df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
 
-    except pd.errors.EmptyDataError:
-        print(f"[SKIP] EmptyDataError: {path}")
-        return None
-    except Exception as e:
-        print(f"[SKIP] read error: {path} -> {type(e).__name__}: {e}")
-        return None
+    ts_values = tf_df["ts"].to_numpy()  # ✅ FIX: searchsorted 안정성/속도
 
+    # ✅ FIX: 전체 EVENT_ROOT 긁지 말고 "grid=.../events/atz/*.parquet"만 잡기 (다른 포맷 섞여서 start_ts 없던 문제 해결)
+    event_paths = list(EVENT_ROOT.rglob("grid=*/events/atz/*.parquet"))
+    print(f"Found {len(event_paths)} event parquet files")
 
-def parse_grid_from_path(path: Path) -> dict | None:
-    m = grid_re.search(str(path))
-    if not m:
-        # grid_id가 경로에 없으면 나중에 합칠 때 골치 아파서 스킵하는 게 안전
-        print(f"[SKIP] grid pattern not found in path: {path}")
-        return None
-    return m.groupdict()
+    rows = []
+    skipped_tf = 0
+    skipped_bad_ts = 0
+    skipped_no_hz = 0
+    skipped_schema = 0
 
+    for event_path in event_paths:
+        try:
+            ev_df = pd.read_parquet(event_path)
+        except Exception:
+            continue
 
-def rank01(s: pd.Series, ascending: bool = True) -> pd.Series:
-    """0~1 랭크 스케일. (큰 값이 좋으면 ascending=True 유지)"""
-    # rank(pct=True)는 동일값 처리 등에서 안정적임
-    r = s.rank(method="average", pct=True, ascending=ascending)
-    # NaN은 그대로 두기
-    return r
+        # ✅ FIX: start_ts/end_ts 없는 이벤트 파일 스킵 (KeyError 방지)
+        if ("start_ts" not in ev_df.columns) or ("end_ts" not in ev_df.columns):
+            skipped_schema += 1
+            continue
 
+        grid = event_path.parts[-4]
+        meta = parse_grid_meta(grid)
 
-# -----------------------------
-# main
-# -----------------------------
-run_dir = Path(r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\run=20260106_023135_536")
-path_list = list(run_dir.rglob("atz_eval_report_all.csv"))
-if not path_list:
-    raise SystemExit("No atz_eval_report_all.csv found")
+        if meta["tf"] != TF:
+            skipped_tf += 1
+            continue
 
-dfs: list[pd.DataFrame] = []
-skipped = 0
+        h = meta["h"]
 
-for p in path_list:
-    df = safe_read_report_csv(p)
-    if df is None:
-        skipped += 1
-        continue
+        ev_df["start_ts"] = pd.to_datetime(ev_df["start_ts"], utc=True, errors="coerce")
+        ev_df["end_ts"] = pd.to_datetime(ev_df["end_ts"], utc=True, errors="coerce")
+        ev_df = ev_df.dropna(subset=["start_ts", "end_ts"])
+        if ev_df.empty:
+            continue
 
-    grid = parse_grid_from_path(p)
-    if grid is None:
-        skipped += 1
-        continue
+        for ev in ev_df.itertuples(index=False):
+            start_ts = ev.start_ts
+            end_ts = ev.end_ts
 
-    # grid 파라미터 컬럼 추가
-    for k, v in grid.items():
-        df[k] = v
+            mask_ev = (tf_df["ts"] >= start_ts) & (tf_df["ts"] <= end_ts)
+            ev_seg = tf_df.loc[mask_ev]
 
-    # numeric 변환 (안되면 NaN)
-    for col in ["w", "q", "m", "g", "h"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+            if ev_seg.empty:
+                skipped_bad_ts += 1
+                continue
 
-    # n_atz numeric
-    df["n_atz"] = pd.to_numeric(df["n_atz"], errors="coerce")
+            # ✅ FIX: ts_values로 searchsorted (pandas Series.values dtype 이슈/느림 방지)
+            hz_start = int(np.searchsorted(ts_values, end_ts, side="right"))
+            hz_end = hz_start + h
 
-    # 필요한 수치 컬럼들도 numeric
-    for col in ["diff_p95", "ks_d", "cliffs_delta"]:
-        df[col] = pd.to_numeric(df[col], errors="coerce")
+            if hz_start >= len(tf_df) or hz_end > len(tf_df):
+                skipped_no_hz += 1
+                continue
 
-    dfs.append(df)
+            hz_seg = tf_df.iloc[hz_start:hz_end]
+            if hz_seg.empty:
+                skipped_no_hz += 1
+                continue
 
-if not dfs:
-    raise SystemExit("All report files were skipped (no usable data).")
+            cv = float(ev_seg["cv"].sum())
+            cvd = float(ev_seg["cvd"].sum())
+            ncvd = cvd / (cv + EPS)
 
-all_report_df = pd.concat(dfs, ignore_index=True)
-print(f"Loaded files: {len(dfs)}  skipped: {skipped}")
-print(f"Loaded rows: {len(all_report_df):,}")
+            ev_open = float(ev_seg["open"].iloc[0])
+            ev_close = float(ev_seg["close"].iloc[-1])
+            event_ret = ev_close / ev_open - 1.0
 
-# -----------------------------
-# rank score (metric별로)
-# -----------------------------
-# score는 'range'로만 보고 싶다면 여기서 필터해도 됨.
-# (요청은 'rank score'까지만이라 전체 metric에 대해 생성)
-def add_rank_score_per_metric(df: pd.DataFrame) -> pd.DataFrame:
-    out_parts = []
-    for metric, gdf in df.groupby("metric", dropna=True):
-        gdf = gdf.copy()
+            ret_over_ncvd = event_ret / (ncvd + EPS)
+            price_impact = event_ret / (ncvd + EPS)
 
-        # 핵심: cliffs는 abs로
-        gdf["abs_cliffs"] = gdf["cliffs_delta"].abs()
+            hz_open = float(hz_seg["open"].iloc[0])
+            hz_close = float(hz_seg["close"].iloc[-1])
 
-        # 랭크 (큰 값이 좋다)
-        A = rank01(gdf["diff_p95"], ascending=True)
-        B = rank01(gdf["ks_d"], ascending=True)
-        C = rank01(gdf["abs_cliffs"], ascending=True)
+            hz_ret = hz_close / hz_open - 1.0
+            hz_max_up = float(hz_seg["high"].max() / hz_open - 1.0)
+            hz_max_dn = float(hz_seg["low"].min() / hz_open - 1.0)
+            hz_vol = float(hz_seg["close"].pct_change().std())
 
-        # 가중합 (추천 비율)
-        gdf["score_rank"] = 0.60 * A + 0.25 * B + 0.15 * C
+            row = {
+                "symbol": SYMBOL,
+                "tf": TF,
+                "grid": grid,
+                "w": meta["w"],
+                "q": meta["q"],
+                "m": meta["m"],
+                "g": meta["g"],
+                "h": meta["h"],
+                "atz_id": ev.atz_id,
+                "n_bars": ev.n_bars,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "cv": cv,
+                "cvd": cvd,
+                "ncvd": ncvd,
+                "ret_over_ncvd": ret_over_ncvd,
+                "trade_count": float(ev_seg["trade_count"].sum()),
+                "event_ret": float(event_ret),
+                "event_range": float(ev_seg["high"].max() - ev_seg["low"].min()),
+                "event_volatility": float(ev_seg["close"].pct_change().std()),
+                "price_impact": float(price_impact),
+                "hz_ret": float(hz_ret),
+                "hz_max_up": hz_max_up,
+                "hz_max_dn": hz_max_dn,
+                "hz_vol": float(hz_vol),
+                "dir_match": int(np.sign(event_ret) == np.sign(hz_ret)),
+            }
+            rows.append(row)
 
-        out_parts.append(gdf)
+    out_df = pd.DataFrame(rows)
+    print(f"Built {len(out_df)} rows")
+    print(
+        f"Skipped tf!={TF} files={skipped_tf}, "
+        f"empty_evseg={skipped_bad_ts}, "
+        f"no_horizon={skipped_no_hz}, "
+        f"schema_missing(start_ts/end_ts)={skipped_schema}"
+    )
 
-    return pd.concat(out_parts, ignore_index=True) if out_parts else df.assign(score_rank=np.nan)
+    out_path = OUT_DIR / "event_horizon_features.parquet"
+    out_df.to_parquet(out_path, index=False)
+    print(f"Saved -> {out_path}")
 
+    # check
+    if not out_df.empty:
+        print("tf unique:", out_df["tf"].unique())
+        print("h unique count:", out_df["h"].nunique())
+        print("start_ts < end_ts all:", bool((out_df["start_ts"] < out_df["end_ts"]).all()))
 
-all_report_df = add_rank_score_per_metric(all_report_df)
-
-# 빠르게 확인
-print("\nScore sample (top 20 by score_rank for metric=range):")
-range_df = all_report_df[all_report_df["metric"] == "range"].copy()
-if not range_df.empty:
-    show_cols = [
-        "tf", "w", "q", "m", "g", "h",
-        "n_atz", "diff_p95", "ks_d", "cliffs_delta", "score_rank"
-    ]
-    print(range_df.sort_values("score_rank", ascending=False)[show_cols].head(20).to_string(index=False))
-else:
-    print("No rows with metric=range")
+if __name__ == "__main__":
+    main()

@@ -98,9 +98,9 @@ for metric in metrics:
 all_report_df = pd.concat(report_per_metric_list, ignore_index=True)
 
 # minimum required filter
-all_report_df = all_report_df[all_report_df["n_atz"] >= 130]
-all_report_df = all_report_df[all_report_df["diff_p95"] > 0]
-all_report_df = all_report_df[all_report_df["ks_d"] >= 0.15]
+all_report_df = all_report_df[all_report_df["n_atz"] >= 150]
+all_report_df = all_report_df[all_report_df["diff_p95"] > 0.003]
+all_report_df = all_report_df[all_report_df["ks_d"] >= 0.2]
 all_report_df = all_report_df[all_report_df["abs_cliffs"] >= 0.2]
 
 # quick check
