@@ -109,7 +109,6 @@ def main():
             ev_open = float(ev_seg["open"].iloc[0])
             ev_close = float(ev_seg["close"].iloc[-1])
             event_ret = ev_close / ev_open - 1.0
-            price_impact = event_ret / (ncvd + EPS)
 
             ret_over_ncvd = event_ret / (ncvd + EPS)
 
@@ -150,7 +149,6 @@ def main():
                 "event_ret": float(event_ret),
                 "event_range": float(ev_seg["high"].max() - ev_seg["low"].min()),
                 "event_volatility": float(ev_seg["close"].pct_change().std()),
-                "price_impact": float(price_impact),
 
                 # price (horizon)
                 "hz_ret": float(hz_ret),
