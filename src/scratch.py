@@ -1,172 +1,124 @@
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
 from pathlib import Path
 
-EPS = 1e-12
+# =========================
+# config
+# =========================
+DATA_PATH = Path(r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\event_horizon_features.parquet")
 
-SYMBOL = "BTCUSDT"
-TF = "15min"
+# band filter (원하면 켜고/끄기)
+USE_BAND_FILTER = True
+BAND = {
+    "tf": ["15min"],
+    "w": [96],
+    "m": [2, 4],
+    "g": [0, 1],
+}
 
-FEATURE_TF_PATH = Path(
-    rf"D:\data\profile-regime\cache\binance\futures_um\symbol=BTCUSDT\features_tf\tf={TF}"
-)
+# heatmap bins
+NX = 10  # ncvd bins
+NY = 10  # ret_over_ncvd bins
 
-EVENT_ROOT = Path(
-    r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT"
-)
+# minimum samples per cell to trust (표본 적은 칸 무시용)
+MIN_COUNT_PER_CELL = 30
 
-OUT_DIR = EVENT_ROOT / "event_features"
-OUT_DIR.mkdir(parents=True, exist_ok=True)
+# =========================
+# load
+# =========================
+df = pd.read_parquet(DATA_PATH)
 
-def parse_grid_meta(grid_name: str) -> dict:
-    # grid=tf=15min__w=96__q=0.90__m=2__g=0__h=16
-    out = {}
-    for part in grid_name.replace("grid=", "").split("__"):
-        k, v = part.split("=")
-        out[k] = v
+# 필수 컬럼 체크
+need = ["ncvd", "ret_over_ncvd", "hz_ret"]
+missing = [c for c in need if c not in df.columns]
+if missing:
+    raise ValueError(f"Missing columns: {missing}")
 
-    out["w"] = int(out["w"])
-    out["q"] = float(out["q"])
-    out["m"] = int(out["m"])
-    out["g"] = int(out["g"])
-    out["h"] = int(out["h"])
-    return out
-
-def main():
-    tf_df = pd.read_parquet(FEATURE_TF_PATH).reset_index(drop=True)
-
-    tf_df["ts"] = pd.to_datetime(tf_df["ts"], utc=True, errors="coerce")
-    tf_df = tf_df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
-
-    ts_values = tf_df["ts"].to_numpy()  # ✅ FIX: searchsorted 안정성/속도
-
-    # ✅ FIX: 전체 EVENT_ROOT 긁지 말고 "grid=.../events/atz/*.parquet"만 잡기 (다른 포맷 섞여서 start_ts 없던 문제 해결)
-    event_paths = list(EVENT_ROOT.rglob("grid=*/events/atz/*.parquet"))
-    print(f"Found {len(event_paths)} event parquet files")
-
-    rows = []
-    skipped_tf = 0
-    skipped_bad_ts = 0
-    skipped_no_hz = 0
-    skipped_schema = 0
-
-    for event_path in event_paths:
-        try:
-            ev_df = pd.read_parquet(event_path)
-        except Exception:
-            continue
-
-        # ✅ FIX: start_ts/end_ts 없는 이벤트 파일 스킵 (KeyError 방지)
-        if ("start_ts" not in ev_df.columns) or ("end_ts" not in ev_df.columns):
-            skipped_schema += 1
-            continue
-
-        grid = event_path.parts[-4]
-        meta = parse_grid_meta(grid)
-
-        if meta["tf"] != TF:
-            skipped_tf += 1
-            continue
-
-        h = meta["h"]
-
-        ev_df["start_ts"] = pd.to_datetime(ev_df["start_ts"], utc=True, errors="coerce")
-        ev_df["end_ts"] = pd.to_datetime(ev_df["end_ts"], utc=True, errors="coerce")
-        ev_df = ev_df.dropna(subset=["start_ts", "end_ts"])
-        if ev_df.empty:
-            continue
-
-        for ev in ev_df.itertuples(index=False):
-            start_ts = ev.start_ts
-            end_ts = ev.end_ts
-
-            mask_ev = (tf_df["ts"] >= start_ts) & (tf_df["ts"] <= end_ts)
-            ev_seg = tf_df.loc[mask_ev]
-
-            if ev_seg.empty:
-                skipped_bad_ts += 1
-                continue
-
-            # ✅ FIX: ts_values로 searchsorted (pandas Series.values dtype 이슈/느림 방지)
-            hz_start = int(np.searchsorted(ts_values, end_ts, side="right"))
-            hz_end = hz_start + h
-
-            if hz_start >= len(tf_df) or hz_end > len(tf_df):
-                skipped_no_hz += 1
-                continue
-
-            hz_seg = tf_df.iloc[hz_start:hz_end]
-            if hz_seg.empty:
-                skipped_no_hz += 1
-                continue
-
-            cv = float(ev_seg["cv"].sum())
-            cvd = float(ev_seg["cvd"].sum())
-            ncvd = cvd / (cv + EPS)
-
-            ev_open = float(ev_seg["open"].iloc[0])
-            ev_close = float(ev_seg["close"].iloc[-1])
-            event_ret = ev_close / ev_open - 1.0
-
-            ret_over_ncvd = event_ret / (ncvd + EPS)
-            price_impact = event_ret / (ncvd + EPS)
-
-            hz_open = float(hz_seg["open"].iloc[0])
-            hz_close = float(hz_seg["close"].iloc[-1])
-
-            hz_ret = hz_close / hz_open - 1.0
-            hz_max_up = float(hz_seg["high"].max() / hz_open - 1.0)
-            hz_max_dn = float(hz_seg["low"].min() / hz_open - 1.0)
-            hz_vol = float(hz_seg["close"].pct_change().std())
-
-            row = {
-                "symbol": SYMBOL,
-                "tf": TF,
-                "grid": grid,
-                "w": meta["w"],
-                "q": meta["q"],
-                "m": meta["m"],
-                "g": meta["g"],
-                "h": meta["h"],
-                "atz_id": ev.atz_id,
-                "n_bars": ev.n_bars,
-                "start_ts": start_ts,
-                "end_ts": end_ts,
-                "cv": cv,
-                "cvd": cvd,
-                "ncvd": ncvd,
-                "ret_over_ncvd": ret_over_ncvd,
-                "trade_count": float(ev_seg["trade_count"].sum()),
-                "event_ret": float(event_ret),
-                "event_range": float(ev_seg["high"].max() - ev_seg["low"].min()),
-                "event_volatility": float(ev_seg["close"].pct_change().std()),
-                "price_impact": float(price_impact),
-                "hz_ret": float(hz_ret),
-                "hz_max_up": hz_max_up,
-                "hz_max_dn": hz_max_dn,
-                "hz_vol": float(hz_vol),
-                "dir_match": int(np.sign(event_ret) == np.sign(hz_ret)),
-            }
-            rows.append(row)
-
-    out_df = pd.DataFrame(rows)
-    print(f"Built {len(out_df)} rows")
-    print(
-        f"Skipped tf!={TF} files={skipped_tf}, "
-        f"empty_evseg={skipped_bad_ts}, "
-        f"no_horizon={skipped_no_hz}, "
-        f"schema_missing(start_ts/end_ts)={skipped_schema}"
+# =========================
+# optional band filter
+# =========================
+if USE_BAND_FILTER:
+    mask = (
+        df["tf"].isin(BAND["tf"])
+        & df["w"].isin(BAND["w"])
+        & df["m"].isin(BAND["m"])
+        & df["g"].isin(BAND["g"])
     )
+    df = df.loc[mask].copy()
 
-    out_path = OUT_DIR / "event_horizon_features.parquet"
-    out_df.to_parquet(out_path, index=False)
-    print(f"Saved -> {out_path}")
+# =========================
+# clean + target
+# =========================
+# 무한/결측 제거
+df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["ncvd", "ret_over_ncvd", "hz_ret"]).copy()
 
-    # check
-    if not out_df.empty:
-        print("tf unique:", out_df["tf"].unique())
-        print("h unique count:", out_df["h"].nunique())
-        print("start_ts < end_ts all:", bool((out_df["start_ts"] < out_df["end_ts"]).all()))
+# 승률 타겟: horizon 수익이 양수인가?
+df["win"] = (df["hz_ret"] > 0).astype(int)
 
-if __name__ == "__main__":
-    main()
+print("Rows after filter:", len(df))
+
+# =========================
+# quantile binning
+# =========================
+# qcut은 동일값이 많으면 bin이 깨질 수 있어서 duplicates='drop' 사용
+df["bin_x"] = pd.qcut(df["ncvd"], q=NX, duplicates="drop")
+df["bin_y"] = pd.qcut(df["ret_over_ncvd"], q=NY, duplicates="drop")
+
+# 실제 bin 개수(중복값 때문에 줄어들 수 있음)
+x_bins = df["bin_x"].cat.categories
+y_bins = df["bin_y"].cat.categories
+print("Actual bins:", len(x_bins), "x", len(y_bins))
+
+# =========================
+# conditional win-rate table
+# =========================
+# 승률(평균) + 샘플 수
+winrate = df.pivot_table(index="bin_y", columns="bin_x", values="win", aggfunc="mean")
+counts  = df.pivot_table(index="bin_y", columns="bin_x", values="win", aggfunc="size")
+
+# 표본 작은 칸은 NaN 처리 (시각화에서 비워짐)
+winrate_masked = winrate.where(counts >= MIN_COUNT_PER_CELL)
+
+# =========================
+# plot heatmap (matplotlib)
+# =========================
+fig, ax = plt.subplots(figsize=(12, 9))
+
+# imshow용 배열 (y가 위->아래로 커지게 하려면 origin="lower")
+im = ax.imshow(winrate_masked.to_numpy(), origin="lower", aspect="auto")
+
+# colorbar
+cbar = fig.colorbar(im, ax=ax)
+cbar.set_label("P(hz_ret > 0)")
+
+# tick labels: bin 구간을 보기 좋게 짧게 표시
+def fmt_interval(iv):
+    # iv: pandas Interval
+    return f"{iv.left:.2f}~{iv.right:.2f}"
+
+ax.set_xticks(np.arange(winrate_masked.shape[1]))
+ax.set_yticks(np.arange(winrate_masked.shape[0]))
+ax.set_xticklabels([fmt_interval(iv) for iv in winrate_masked.columns], rotation=45, ha="right")
+ax.set_yticklabels([fmt_interval(iv) for iv in winrate_masked.index])
+
+ax.set_xlabel("ncvd (quantile bins)")
+ax.set_ylabel("ret_over_ncvd (quantile bins)")
+ax.set_title(f"Conditional Win-rate Heatmap: P(hz_ret>0 | ncvd_bin, ret_over_ncvd_bin)\n"
+             f"(min count per cell = {MIN_COUNT_PER_CELL}, rows={len(df)})")
+
+# 각 칸에 "승률% / n" 텍스트 찍기
+wr_vals = winrate.to_numpy()
+ct_vals = counts.to_numpy()
+
+for iy in range(winrate_masked.shape[0]):
+    for ix in range(winrate_masked.shape[1]):
+        n = ct_vals[iy, ix] if not np.isnan(ct_vals[iy, ix]) else 0
+        wr = wr_vals[iy, ix]
+        if np.isnan(winrate_masked.to_numpy()[iy, ix]):
+            # 표본 부족이면 n만 작게 표시하거나 아예 스킵
+            continue
+        ax.text(ix, iy, f"{wr*100:.1f}%\n(n={int(n)})", ha="center", va="center", fontsize=8)
+
+plt.tight_layout()
+plt.show()
