@@ -32,12 +32,22 @@ def parse_grid_meta(grid_name: str) -> dict:
     out["h"] = int(out["h"])
     return out
 
+def tf_to_timedelta(tf: str) -> pd.Timedelta:
+    tf = tf.strip().lower()
+    if tf.endswith("min"):
+        return pd.Timedelta(minutes=int(tf.replace("min", "")))
+    if tf.endswith("h"):
+        return pd.Timedelta(hours=int(tf.replace("h", "")))
+    raise ValueError(f"Unsupported TF format: {tf}")
+
 def main():
     tf_df = pd.read_parquet(FEATURE_TF_PATH).reset_index(drop=True)
 
     # ts -> datetime
     tf_df["ts"] = pd.to_datetime(tf_df["ts"], utc=True, errors="coerce")
     tf_df = tf_df.dropna(subset=["ts"]).sort_values("ts").reset_index(drop=True)
+
+    tf_delta = tf_to_timedelta(TF)
 
     event_paths = list(EVENT_ROOT.rglob("grid=*/events/atz/*.parquet"))
     print(f"Found {len(event_paths)} event parquet files")
@@ -47,6 +57,8 @@ def main():
     skipped_bad_ts = 0
     skipped_no_hz = 0
     skipped_schema = 0
+
+    ts_values = tf_df["ts"].to_numpy()
 
     for event_path in event_paths:
         try:
@@ -84,8 +96,8 @@ def main():
                 skipped_bad_ts += 1
                 continue
 
-            ts_values = tf_df["ts"].to_numpy()
-            hz_start = int(np.searchsorted(ts_values, end_ts, side="right"))
+            entry_ts = end_ts + tf_delta
+            hz_start = int(np.searchsorted(ts_values, entry_ts, side="right"))
             hz_end = hz_start + h
 
             if hz_start >= len(tf_df):
@@ -137,6 +149,7 @@ def main():
                 # time
                 "start_ts": start_ts,
                 "end_ts": end_ts,
+                "entry_ts": entry_ts,
 
                 # activity
                 "cv": cv,
@@ -174,7 +187,7 @@ def main():
         print("tf unique:", out_df["tf"].unique())
         print("h unique count:", out_df["h"].nunique())
         print("start_ts < end_ts all:", bool((out_df["start_ts"] < out_df["end_ts"]).all()))
-
+        print("entry_ts >= end_ts all:", bool((out_df["entry_ts"] >= out_df["end_ts"]).all()))
 
 if __name__ == "__main__":
     main()

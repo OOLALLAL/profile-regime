@@ -1,124 +1,129 @@
-import numpy as np
 import pandas as pd
-import matplotlib.pyplot as plt
+import numpy as np
 from pathlib import Path
 
-# =========================
-# config
-# =========================
-DATA_PATH = Path(r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\event_horizon_features.parquet")
+EPS = 1e-12
 
-# band filter (원하면 켜고/끄기)
-USE_BAND_FILTER = True
-BAND = {
-    "tf": ["15min"],
-    "w": [96],
-    "m": [2, 4],
-    "g": [0, 1],
-}
+# =====================
+# CONFIG
+# =====================
+EVENT_PATH = r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\event_horizon_features.parquet"
+RULE_PATH  = r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\rules\rule_table_train_test.csv"
 
-# heatmap bins
-NX = 10  # ncvd bins
-NY = 10  # ret_over_ncvd bins
+OUT_DIR = Path(r"D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\walkforward")
+OUT_DIR.mkdir(parents=True, exist_ok=True)
 
-# minimum samples per cell to trust (표본 적은 칸 무시용)
-MIN_COUNT_PER_CELL = 30
+# rule filter criteria
+MIN_TRAIN_SCORE = 2.0
+MIN_TEST_SCORE  = 1.0
+MIN_TEST_COUNT  = 30
 
-# =========================
-# load
-# =========================
-df = pd.read_parquet(DATA_PATH)
+# walk-forward window
+TRAIN_DAYS = 90
+TEST_DAYS  = 30
+STEP_DAYS  = 30
 
-# 필수 컬럼 체크
-need = ["ncvd", "ret_over_ncvd", "hz_ret"]
-missing = [c for c in need if c not in df.columns]
-if missing:
-    raise ValueError(f"Missing columns: {missing}")
+# =====================
+# UTIL
+# =====================
+def compute_trade_return(df, tp, sl):
+    up_hit = df["hz_max_up"] >= tp
+    dn_hit = df["hz_max_dn"] <= -sl
+    both = up_hit & dn_hit
 
-# =========================
-# optional band filter
-# =========================
-if USE_BAND_FILTER:
-    mask = (
-        df["tf"].isin(BAND["tf"])
-        & df["w"].isin(BAND["w"])
-        & df["m"].isin(BAND["m"])
-        & df["g"].isin(BAND["g"])
-    )
-    df = df.loc[mask].copy()
+    r = df["hz_ret"].copy()
+    r[up_hit] = tp
+    r[dn_hit] = -sl
+    r[both] = -sl   # conservative
 
-# =========================
-# clean + target
-# =========================
-# 무한/결측 제거
-df = df.replace([np.inf, -np.inf], np.nan).dropna(subset=["ncvd", "ret_over_ncvd", "hz_ret"]).copy()
+    return r
 
-# 승률 타겟: horizon 수익이 양수인가?
-df["win"] = (df["hz_ret"] > 0).astype(int)
+def max_drawdown(x):
+    c = np.cumsum(x)
+    peak = np.maximum.accumulate(c)
+    return np.min(c - peak)
 
-print("Rows after filter:", len(df))
+# =====================
+# MAIN
+# =====================
+def main():
+    events = pd.read_parquet(EVENT_PATH)
+    events["entry_ts"] = pd.to_datetime(events["end_ts"], utc=True)
+    events = events.sort_values("entry_ts").reset_index(drop=True)
 
-# =========================
-# quantile binning
-# =========================
-# qcut은 동일값이 많으면 bin이 깨질 수 있어서 duplicates='drop' 사용
-df["bin_x"] = pd.qcut(df["ncvd"], q=NX, duplicates="drop")
-df["bin_y"] = pd.qcut(df["ret_over_ncvd"], q=NY, duplicates="drop")
+    rules = pd.read_csv(RULE_PATH)
 
-# 실제 bin 개수(중복값 때문에 줄어들 수 있음)
-x_bins = df["bin_x"].cat.categories
-y_bins = df["bin_y"].cat.categories
-print("Actual bins:", len(x_bins), "x", len(y_bins))
+    # ---- rule pre-filter ----
+    rules = rules[
+        (rules["train_score"] >= MIN_TRAIN_SCORE) &
+        (rules["test_score"]  >= MIN_TEST_SCORE) &
+        (rules["test_count"]  >= MIN_TEST_COUNT)
+    ].reset_index(drop=True)
 
-# =========================
-# conditional win-rate table
-# =========================
-# 승률(평균) + 샘플 수
-winrate = df.pivot_table(index="bin_y", columns="bin_x", values="win", aggfunc="mean")
-counts  = df.pivot_table(index="bin_y", columns="bin_x", values="win", aggfunc="size")
+    print(f"Candidate rules: {len(rules)}")
 
-# 표본 작은 칸은 NaN 처리 (시각화에서 비워짐)
-winrate_masked = winrate.where(counts >= MIN_COUNT_PER_CELL)
+    results = []
 
-# =========================
-# plot heatmap (matplotlib)
-# =========================
-fig, ax = plt.subplots(figsize=(12, 9))
+    t0 = events["entry_ts"].min()
+    t1 = events["entry_ts"].max()
 
-# imshow용 배열 (y가 위->아래로 커지게 하려면 origin="lower")
-im = ax.imshow(winrate_masked.to_numpy(), origin="lower", aspect="auto")
+    start = t0
 
-# colorbar
-cbar = fig.colorbar(im, ax=ax)
-cbar.set_label("P(hz_ret > 0)")
+    while start + pd.Timedelta(days=TRAIN_DAYS + TEST_DAYS) <= t1:
+        train_end = start + pd.Timedelta(days=TRAIN_DAYS)
+        test_end  = train_end + pd.Timedelta(days=TEST_DAYS)
 
-# tick labels: bin 구간을 보기 좋게 짧게 표시
-def fmt_interval(iv):
-    # iv: pandas Interval
-    return f"{iv.left:.2f}~{iv.right:.2f}"
+        train_ev = events[(events["entry_ts"] >= start) & (events["entry_ts"] < train_end)]
+        test_ev  = events[(events["entry_ts"] >= train_end) & (events["entry_ts"] < test_end)]
 
-ax.set_xticks(np.arange(winrate_masked.shape[1]))
-ax.set_yticks(np.arange(winrate_masked.shape[0]))
-ax.set_xticklabels([fmt_interval(iv) for iv in winrate_masked.columns], rotation=45, ha="right")
-ax.set_yticklabels([fmt_interval(iv) for iv in winrate_masked.index])
-
-ax.set_xlabel("ncvd (quantile bins)")
-ax.set_ylabel("ret_over_ncvd (quantile bins)")
-ax.set_title(f"Conditional Win-rate Heatmap: P(hz_ret>0 | ncvd_bin, ret_over_ncvd_bin)\n"
-             f"(min count per cell = {MIN_COUNT_PER_CELL}, rows={len(df)})")
-
-# 각 칸에 "승률% / n" 텍스트 찍기
-wr_vals = winrate.to_numpy()
-ct_vals = counts.to_numpy()
-
-for iy in range(winrate_masked.shape[0]):
-    for ix in range(winrate_masked.shape[1]):
-        n = ct_vals[iy, ix] if not np.isnan(ct_vals[iy, ix]) else 0
-        wr = wr_vals[iy, ix]
-        if np.isnan(winrate_masked.to_numpy()[iy, ix]):
-            # 표본 부족이면 n만 작게 표시하거나 아예 스킵
+        if len(test_ev) < 10:
+            start += pd.Timedelta(days=STEP_DAYS)
             continue
-        ax.text(ix, iy, f"{wr*100:.1f}%\n(n={int(n)})", ha="center", va="center", fontsize=8)
 
-plt.tight_layout()
-plt.show()
+        for r in rules.itertuples(index=False):
+            mask = (
+                (train_ev[r.xcol].between(r.bin_x.left, r.bin_x.right)) &
+                (train_ev[r.ycol].between(r.bin_y.left, r.bin_y.right))
+            )
+            if mask.sum() < 20:
+                continue
+
+            test_mask = (
+                (test_ev[r.xcol].between(r.bin_x.left, r.bin_x.right)) &
+                (test_ev[r.ycol].between(r.bin_y.left, r.bin_y.right))
+            )
+
+            d = test_ev.loc[test_mask].copy()
+            if len(d) < 10:
+                continue
+
+            d["ret"] = compute_trade_return(d, r.tp, r.sl)
+
+            results.append({
+                "xcol": r.xcol,
+                "ycol": r.ycol,
+                "tp": r.tp,
+                "sl": r.sl,
+                "bin_x": r.bin_x,
+                "bin_y": r.bin_y,
+                "start": start,
+                "mean_ret": d["ret"].mean(),
+                "win_rate": (d["ret"] > 0).mean(),
+                "count": len(d),
+                "sharpe_like": d["ret"].mean() / (d["ret"].std() + EPS),
+                "max_dd": max_drawdown(d["ret"].values),
+            })
+
+        start += pd.Timedelta(days=STEP_DAYS)
+
+    res = pd.DataFrame(results)
+    res = res.sort_values("sharpe_like", ascending=False)
+
+    out = OUT_DIR / "walkforward_results.csv"
+    res.to_csv(out, index=False, encoding="utf-8-sig")
+
+    print(f"Saved -> {out}")
+    print(res.head(10))
+
+if __name__ == "__main__":
+    main()
