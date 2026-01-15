@@ -6,6 +6,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -25,42 +26,34 @@ def setup_logging(level: str):
 def parquet_exists(path: Path) -> bool:
     return path.exists() and path.stat().st_size > 0
 
-def read_aggtrades_csv(csv_path: Path) -> pd.DataFrame:
-    df = pd.read_csv(
-        csv_path,
-        dtype={
-            "agg_trade_id": "int64",
-            "price": "float64",
-            "quantity": "float64",
-            "first_trade_id": "int64",
-            "last_trade_id": "int64",
-            "transact_time": "int64",
-        },
-    )
-    df["is_buyer_maker"] = df["is_buyer_maker"].astype("bool")
+def read_aggtrades_csv(csv_path: str) -> pd.DataFrame:
+    first = pd.read_csv(csv_path, nrows=1, header=None).iloc[0, 0]
+    has_header = not str(first).strip().isdigit()
 
-    df["side"] = df["is_buyer_maker"].map({True: -1, False: 1}).astype("int8")
-    df["signed_quantity"] = df["side"] * df["quantity"]
+    if has_header:
+        df = pd.read_csv(csv_path, low_memory=False)
+        df = df.rename(columns={"isBuyerMaker": "is_buyer_maker", "transactTime": "transact_time"})
+    else:
+        df = pd.read_csv(csv_path, header=None, low_memory=False)
+        df.columns = ["agg_trade_id","price","quantity","first_trade_id","last_trade_id","transact_time","is_buyer_maker"]
+
+
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["quantity"] = pd.to_numeric(df["quantity"], errors="coerce")
+    df["transact_time"] = pd.to_numeric(df["transact_time"], errors="coerce")
+    df = df.dropna(subset=["price","quantity","transact_time"])
+
+    df["transact_time"] = df["transact_time"].astype("int64")
+
+    df["is_buyer_maker"] = df["is_buyer_maker"].astype(str).str.lower().isin(["true", "1"])
+
+    df["signed_quantity"] = np.where(df["is_buyer_maker"], -df["quantity"], df["quantity"])
 
     df["volume"] = df["price"] * df["quantity"]
-    df["signed_volume"] = df["side"] * df["volume"]
+    df["signed_volume"] = np.where(df["is_buyer_maker"], -df["volume"], df["volume"])
 
     df = df.sort_values("transact_time").reset_index(drop=True)
-    return df[
-        [
-            "transact_time",
-            "price",
-            "quantity",
-            "volume",
-            "side",
-            "signed_quantity",
-            "signed_volume",
-            "is_buyer_maker",
-            "agg_trade_id",
-            "first_trade_id",
-            "last_trade_id",
-        ]
-    ]
+    return df
 
 def convert_zip_to_parquet(
         zip_path: Path,

@@ -1,0 +1,12 @@
+py src/paper.py `
+  --in-parquet "D:\data\profile-regime\experiments\binance\futures_um\symbol=BTCUSDT\event_features\event_horizon_features.parquet" `
+  --out-dir "D:\data\profile-regime\experiments\paper_run" `
+  --h 32 --tp 0.015 --sl 0.012 `
+  --slice-q 0.9 --dir-rule cvd_sign --both-policy drop `
+  --dedup-key "entry_ts,side" --dedup-keep max_cv --singlepos-strict `
+  --nohit-pnl mtm_last `
+  --fee-grid "0,1,2,5,10,15" `
+  --fee-bps 10 --slippage-bps 2 --time-split Q `
+  --ncvd-long-max 0.04 `
+  --ncvd-short-min -0.03 `
+  --event-vol-max 0.008

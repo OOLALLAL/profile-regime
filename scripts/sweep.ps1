@@ -3,17 +3,17 @@
 # powershell -ExecutionPolicy Bypass -File .\scripts\sweep.ps1
 param(
     [string]$symbol = "BTCUSDT",
-    [string]$start = "20250601",
-    [string]$end = "20251220",
+    [string]$start = "20210101",
+    [string]$end = "20210101",
     [string]$data_root = "D:\data\profile-regime",
 
     # grid
-    [string[]]$tf_list = @("15min", "1h"),
-    [int[]]$window = @(96, 192, 384),
+    [string[]]$tf_list = @("15min"),
+    [int[]]$window = @(96),
     [double[]]$quantile = @(0.90, 0.95),
-    [int[]]$min_bars = @(2, 4, 8),
+    [int[]]$min_bars = @(2, 4),
     [double[]]$merge_gap_ratio = @(0.25, 0),        # merge_gap = min_bars * merge_gap_ratio
-    [int[]]$horizon_ratio = @(2, 4, 6, 8)              # horizon = min_bars * horizon_ratio
+    [int[]]$horizon_ratio = @(4, 6, 8)              # horizon = min_bars * horizon_ratio
 )
 # default params
 #   sleep-sec : 0.2
